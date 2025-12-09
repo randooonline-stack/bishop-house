@@ -1,15 +1,15 @@
+import eventlet
+# MUST be the first line to patch standard library for async support
+eventlet.monkey_patch()
+
 import os
 from flask import Flask, render_template, request
 from flask_socketio import SocketIO, emit
-import eventlet
-
-# Monkey patch for eventlet (required for Gunicorn/Async)
-eventlet.monkey_patch()
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'bishop_secure_key_99'
 
-# Initialize SocketIO
+# Initialize SocketIO with eventlet async mode
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # In-Memory Storage
@@ -58,13 +58,9 @@ def handle_message(data):
     if target_sid:
         emit('receive_message', data, to=target_sid)
     
-    # Send back to sender (confirmation) - optional, but good for UI consistency if not handled locally
-    # We will handle "Me" bubble locally in JS, so strictly just forward here if needed.
+    # Send back to sender (confirmation) handled locally in UI
 
 # --- 3. VOICE CALL SIGNALING (Relay) ---
-# WebRTC requires exchanging "Offers", "Answers", and "ICE Candidates" between peers.
-# The server acts as the signal pipe.
-
 @socketio.on('call_request')
 def handle_call_req(data):
     # data: { target_sid, caller_name, caller_sid, offer }
