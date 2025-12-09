@@ -205,12 +205,12 @@ button.danger:hover{background:rgba(255,51,51,0.1)}
 <div id="loginScreen">
   <div class="loginCard">
     <pre style="color:var(--neon);font-size:12px;line-height:1.05em;margin-bottom:12px;white-space:pre-wrap">
-          /\          
-         /  \         
-        /++++\        
-       /  /\  \        
-      /__/  \__\      
-          \/            
+          /\
+         /  \
+        /++++\
+       /  /\  \
+      /__/  \__\
+          \/
     </pre>
     <h2 style="margin-bottom:10px">ACCESS CONTROL</h2>
     <div style="margin-top:8px">
@@ -250,9 +250,9 @@ button.danger:hover{background:rgba(255,51,51,0.1)}
 /* ---------- 1. DATA PERSISTENCE & INIT ---------- */
 // Added 'recruiter' field to determine who added whom
 const DEFAULT_MEMBERS = [
-    { name: "Bishop 1", role: "supreme", lat: 38.8977, lon: -77.0365, lastActive: 0, recruiter: "System" }, 
-    { name: "Bishop A", role: "node", lat: 24.7136, lon: 46.6753, lastActive: 0, recruiter: "Bishop 1" },      
-    { name: "Bishop N", role: "node", lat: 9.9312, lon: 76.2673, lastActive: 0, recruiter: "Bishop 1" }      
+    { name: "Bishop 1", role: "supreme", lat: 38.8977, lon: -77.0365, lastActive: 0, recruiter: "System" },
+    { name: "Bishop A", role: "node", lat: 24.7136, lon: 46.6753, lastActive: 0, recruiter: "Bishop 1" },
+    { name: "Bishop N", role: "node", lat: 9.9312, lon: 76.2673, lastActive: 0, recruiter: "Bishop 1" }
 ];
 
 let networkMembers = JSON.parse(localStorage.getItem('bishop_members')) || DEFAULT_MEMBERS;
@@ -269,20 +269,31 @@ let socket = null; // SocketIO Instance
 // WebRTC Variables
 let localStream = null;
 let peerConnection = null;
-const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+const rtcConfig = { 
+    iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+    ] 
+};
 let currentCallTarget = null;
+
+// Store pending call data globally
+let pendingCallOffer = null;
+let pendingCallerSid = null;
+let pendingCallerName = null;
 
 /* ---------- 2. LOGIN / LOGOUT / SOCKET ---------- */
 function initSocket() {
     socket = io();
-    
+
     socket.on('connect', () => {
+        console.log('Socket connected:', socket.id);
         // Find my coords
         if(currentUser && navigator.geolocation){
              navigator.geolocation.getCurrentPosition(position => {
-                socket.emit('join_network', { 
-                    name: currentUser, 
-                    lat: position.coords.latitude, 
+                socket.emit('join_network', {
+                    name: currentUser,
+                    lat: position.coords.latitude,
                     lon: position.coords.longitude,
                     lastActive: Date.now()
                 });
@@ -293,8 +304,13 @@ function initSocket() {
         }
     });
 
+    socket.on('disconnect', () => {
+        console.log('Socket disconnected');
+    });
+
     // Update real-time status and SID mapping
     socket.on('network_update', (activeList) => {
+        console.log('Network update received:', activeList);
         onlineSIDs = {};
         activeList.forEach(user => {
             onlineSIDs[user.name] = user.sid;
@@ -311,6 +327,7 @@ function initSocket() {
     });
 
     socket.on('receive_message', (data) => {
+        console.log('Message received:', data);
         // data: { sender, message }
         const key = `chat_${data.sender.replace(/\s/g,'')}`;
         // Save to local storage
@@ -331,23 +348,42 @@ function initSocket() {
 
     // --- WebRTC Handlers ---
     socket.on('incoming_call', async (data) => {
+        console.log('Incoming call received:', data);
         // data: { caller_name, caller_sid, offer }
         handleIncomingCall(data);
     });
 
     socket.on('call_answered', async (data) => {
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
-        const win = document.getElementById('win_call_status');
-        if(win) win.innerHTML = `<div style="color:var(--neon); text-align:center">VOICE UPLINK SECURED</div><div class="voice-pulse"><div class="voice-bar"></div></div><button class="danger" onclick="endCall('${data.target_sid}')" style="width:100%; margin-top:10px">TERMINATE UPLINK</button>`;
+        console.log('Call answered event:', data);
+        try {
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+            const win = document.getElementById('win_call_status');
+            if(win) {
+                win.innerHTML = `
+                    <div style="color:var(--neon); text-align:center">VOICE UPLINK SECURED</div>
+                    <div class="voice-pulse"><div class="voice-bar"></div></div>
+                    <button class="danger" onclick="endCall('${data.target_sid}')" style="width:100%; margin-top:10px">TERMINATE UPLINK</button>
+                `;
+            }
+        } catch(e) {
+            console.error('Error setting remote description:', e);
+        }
     });
 
     socket.on('receive_ice_candidate', async (data) => {
+        console.log('ICE candidate received:', data);
         if(peerConnection){
-            try { await peerConnection.addIceCandidate(data.candidate); } catch(e){}
+            try { 
+                await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate)); 
+                console.log('ICE candidate added successfully');
+            } catch(e){
+                console.error('Error adding ICE candidate:', e);
+            }
         }
     });
 
     socket.on('call_terminated', () => {
+        console.log('Call terminated by remote peer');
         cleanupCall();
         alert("TRANSMISSION ENDED BY REMOTE PEER.");
     });
@@ -356,7 +392,7 @@ function initSocket() {
 function doLogin(){
   const u = document.getElementById('userIn').value.trim();
   const p = document.getElementById('passIn').value;
-  
+
   let validName = null;
   const exactMatch = networkMembers.find(m => m.name === u);
   const spaceMatch = networkMembers.find(m => m.name.replace(/\s/g, '') === u);
@@ -372,10 +408,10 @@ function doLogin(){
     document.getElementById('rightRadar').style.display = 'flex';
     who.innerText = validName;
     document.getElementById('logoutBtn').style.display = 'inline-block';
-    
+
     enableTermuxWallpaper(true);
-    hasConnectedToSat = false; 
-    
+    hasConnectedToSat = false;
+
     updateMyRealLocation();
     renderFlowchart();
     openDesktopWidgets();
@@ -383,7 +419,7 @@ function doLogin(){
 
     // Init Socket
     initSocket();
-    
+
   } else {
     document.getElementById('loginMsg').innerText = 'ACCESS DENIED';
   }
@@ -431,7 +467,7 @@ function renderFlowchart(){
 
     const grid = document.createElement('div');
     grid.className = 'network-grid';
-    
+
     networkMembers.filter(m => m.role !== 'supreme').forEach(m => {
         const node = document.createElement('div');
         node.className = 'node';
@@ -440,7 +476,7 @@ function renderFlowchart(){
         node.onclick = () => runWithSat(() => handleNodeClick(m));
         grid.appendChild(node);
     });
-    
+
     container.appendChild(grid);
 }
 
@@ -450,7 +486,7 @@ async function handleNodeClick(targetMember){
     let lat = targetMember.lat;
     let lon = targetMember.lon;
     let locName = "ENCRYPTED SECTOR";
-    
+
     try {
         const res = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`);
         const data = await res.json();
@@ -517,7 +553,7 @@ function updateMyRealLocation(){
                 networkMembers[memberIndex].lon = lon;
                 networkMembers[memberIndex].lastActive = Date.now();
                 saveAndRefreshNetwork();
-                updateRadar(); 
+                updateRadar();
             }
         });
     }
@@ -530,19 +566,19 @@ function updateRadar() {
 
     const blipsContainer = document.getElementById('radarBlips');
     const listContainer = document.getElementById('radarList');
-    
+
     blipsContainer.innerHTML = '';
     let listHtml = '';
     let nearbyList = [];
-    
+
     networkMembers.forEach(m => {
         if(m.name !== currentUser) {
             const dist = getDistanceFromLatLonInKm(myData.lat, myData.lon, m.lat, m.lon);
             const angle = Math.random() * 360;
-            const radius = Math.min(dist / 50, 90); 
+            const radius = Math.min(dist / 50, 90);
             const top = 50 + radius * Math.sin(angle * Math.PI / 180);
             const left = 50 + radius * Math.cos(angle * Math.PI / 180);
-            
+
             const blip = document.createElement('div');
             blip.className = 'radar-blip';
             blip.style.top = top + '%';
@@ -550,13 +586,13 @@ function updateRadar() {
             blip.title = `${m.name} (${dist.toFixed(0)}km)`;
             if(onlineSIDs[m.name]) blip.style.background = '#00ff66'; // Online color
             blipsContainer.appendChild(blip);
-            
+
             nearbyList.push({ name: m.name, dist: dist, active: !!onlineSIDs[m.name] });
         }
     });
-    
+
     nearbyList.sort((a,b) => a.dist - b.dist);
-    
+
     if(nearbyList.length === 0) {
         listHtml = `<div class="muted">NO ACTIVE SIGNALS</div>`;
     } else {
@@ -564,7 +600,7 @@ function updateRadar() {
             let color = item.dist < 50 ? '#ff3333' : (item.dist < 1000 ? 'var(--neon)' : '#555');
             // If offline, dim it
             if(!item.active) color = '#333';
-            
+
             let label = item.dist < 50 ? 'VICINITY' : (item.dist < 1000 ? 'REGIONAL' : 'GLOBAL');
             listHtml += `<div style="color:${color}; display:flex; justify-content:space-between; margin-bottom:4px; border-bottom:1px solid #222;">
                         <span>${item.name}</span>
@@ -576,10 +612,10 @@ function updateRadar() {
 }
 
 function getDistanceFromLatLonInKm(lat1,lon1,lat2,lon2) {
-  var R = 6371; var dLat = deg2rad(lat2-lat1); var dLon = deg2rad(lon2-lon1); 
-  var a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) * Math.sin(dLon/2) * Math.sin(dLon/2); 
-  var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); 
-  return R * c; 
+  var R = 6371; var dLat = deg2rad(lat2-lat1); var dLon = deg2rad(lon2-lon1);
+  var a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) * Math.sin(dLon/2) * Math.sin(dLon/2);
+  var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
 }
 function deg2rad(deg) { return deg * (Math.PI/180); }
 
@@ -607,7 +643,7 @@ function renderVaultContent(container){
         </div>
         <div class="file-grid">
     `;
-    
+
     const files = JSON.parse(localStorage.getItem('bishop_vault') || '[]');
     files.forEach(f => {
         html += `
@@ -622,7 +658,7 @@ function renderVaultContent(container){
             </div>
         `;
     });
-    
+
     if(files.length === 0) html += `<div class="muted" style="padding:10px;">Repository Empty.</div>`;
     html += `</div>`;
     container.innerHTML = html;
@@ -642,7 +678,7 @@ function handleFileUpload(input){
         };
         reader.readAsDataURL(file);
     }
-    input.value = ''; 
+    input.value = '';
 }
 
 function createDeadDrop(id){
@@ -680,7 +716,7 @@ function retrieveDeadDrop(){
         const file = drops[code].file;
         const files = JSON.parse(localStorage.getItem('bishop_vault') || '[]');
         // New ID to avoid conflicts
-        file.id = Date.now(); 
+        file.id = Date.now();
         files.push(file);
         localStorage.setItem('bishop_vault', JSON.stringify(files));
         alert(`ACCESS GRANTED. FILE RETRIEVED: ${file.name}`);
@@ -715,7 +751,7 @@ function runWithSat(callback, forceSat = false) {
         const text = document.getElementById('satText');
         if(forceSat) text.innerText = "ALLOCATING ENCRYPTED VOICE BANDWIDTH...";
         else text.innerText = "CONNECTING SECRET SATELLITE SERVER OF BISHOP HOUSE...";
-        
+
         overlay.style.display = 'flex';
         setTimeout(() => {
             overlay.style.display = 'none';
@@ -745,7 +781,7 @@ function renderMemberList(){
         const btn = canRemove ? `<button class="btn-xs" style="color:red; border-color:red;" onclick="removeBishop('${m.name}')">EXILE</button>` : '';
         const badge = m.recruiter ? `<span style="font-size:9px; color:#666;">(Added by ${m.recruiter})</span>` : '';
         const online = onlineSIDs[m.name] ? '<span style="color:#0f0; font-size:9px"> [ON]</span>' : '';
-        
+
         return `<div style="display:flex; justify-content:space-between; border-bottom:1px solid #222; padding:5px;">
             <span>${m.name} ${badge} ${online}</span>
             ${m.role !== 'supreme' ? btn : ''}
@@ -756,16 +792,16 @@ function renderMemberList(){
 function addBishop(){
     const name = document.getElementById('newBishopName').value;
     if(!name) return alert("Missing intel.");
-    
-    networkMembers.push({ 
-        name: name, 
-        role: "node", 
-        lat: 0, 
-        lon: 0, 
+
+    networkMembers.push({
+        name: name,
+        role: "node",
+        lat: 0,
+        lon: 0,
         lastActive: 0,
-        recruiter: currentUser 
+        recruiter: currentUser
     });
-    
+
     saveAndRefreshNetwork();
     const win = Array.from(document.querySelectorAll('.win')).find(w => w.querySelector('.title').innerText.includes('MANAGER'));
     if(win) win.querySelector('#memberList').innerHTML = renderMemberList();
@@ -907,7 +943,7 @@ function createWindow(title, htmlBody, left=100, top=100){
   win.style.zIndex = ++zCounter;
   win.querySelector('.closeBtn').onclick = () => win.remove();
   win.querySelector('.minBtn').onclick = () => { win.style.display='none'; };
-  
+
   const hdr = win.querySelector('.hdr');
   hdr.addEventListener('mousedown', (e) => {
     win.style.zIndex = ++zCounter;
@@ -931,7 +967,7 @@ function createMemberChatWin(target, left, top){
   const key = `chat_${target.replace(/\s/g,'')}`;
   const targetSid = onlineSIDs[target];
   const statusHtml = targetSid ? "<span style='color:var(--neon)'>[SECURE LINK AVAILABLE]</span>" : "<span style='color:#555'>[LINK OFFLINE]</span>";
-  
+
   const html = `
     <div style="font-size:10px; margin-bottom:5px;">STATUS: ${statusHtml}</div>
     <div id="log_${key}" style="height:150px; overflow-y:auto; border:1px solid #333; margin-bottom:5px; padding:5px;"></div>
@@ -950,7 +986,7 @@ function sendMsg(key, targetName){
   const msg = input.value;
   if(!msg) return;
   const log = document.getElementById(`log_${key}`);
-  
+
   // Send via socket if user online
   const sid = onlineSIDs[targetName];
   if(sid){
@@ -967,7 +1003,7 @@ function sendMsg(key, targetName){
   log.innerHTML += `<div><span class="msg-me">Me:</span> ${escapeHTML(msg)}</div>`;
   input.value = '';
   log.scrollTop = log.scrollHeight;
-  
+
   let history = JSON.parse(localStorage.getItem(key) || "[]");
   history.push({sender: "Me", txt: msg});
   localStorage.setItem(key, JSON.stringify(history));
@@ -977,19 +1013,19 @@ function loadChat(key){
   const log = document.getElementById(`log_${key}`);
   if(!log) return;
   let history = JSON.parse(localStorage.getItem(key) || "[]");
-  history.forEach(h => { 
+  history.forEach(h => {
       const cls = h.sender === "Me" ? "msg-me" : "msg-them";
-      log.innerHTML += `<div><span class="${cls}">${h.sender}:</span> ${escapeHTML(h.txt)}</div>`; 
+      log.innerHTML += `<div><span class="${cls}">${h.sender}:</span> ${escapeHTML(h.txt)}</div>`;
   });
   log.scrollTop = log.scrollHeight;
 }
 
-/* ---------- 12. WEBRTC AUDIO CALL IMPLEMENTATION ---------- */
+/* ---------- 12. WEBRTC AUDIO CALL IMPLEMENTATION (FIXED) ---------- */
 
 async function initCall(targetName){
     const sid = onlineSIDs[targetName];
     if(!sid) return alert("TARGET OFFLINE - CANNOT ESTABLISH VOICE LINK");
-    
+
     currentCallTarget = sid;
     runWithSat(async () => {
         // Create Call Window
@@ -997,108 +1033,196 @@ async function initCall(targetName){
         createWindow(`CALL: ${targetName}`, html, 300, 300);
 
         try {
-            // Get Mic
+            console.log("Getting microphone access...");
             localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            
-            // Create Peer Connection
+
+            console.log("Creating peer connection...");
             peerConnection = new RTCPeerConnection(rtcConfig);
-            
-            // Add Tracks
-            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
-            
-            // Handle Ice Candidates
+
+            localStream.getTracks().forEach(track => {
+                console.log("Adding local track:", track.kind);
+                peerConnection.addTrack(track, localStream);
+            });
+
             peerConnection.onicecandidate = event => {
                 if (event.candidate) {
+                    console.log("Sending ICE candidate");
                     socket.emit('ice_candidate', { target_sid: sid, candidate: event.candidate });
                 }
             };
 
-            // Handle Remote Stream
             peerConnection.ontrack = event => {
+                console.log("Received remote track");
                 const remoteAudio = document.getElementById('remoteAudio');
                 if (remoteAudio.srcObject !== event.streams[0]) {
                     remoteAudio.srcObject = event.streams[0];
-                    console.log('Received remote stream');
+                    remoteAudio.play().catch(e => console.error("Audio play error:", e));
                 }
             };
 
-            // Create Offer
+            peerConnection.onconnectionstatechange = () => {
+                console.log("Connection state:", peerConnection.connectionState);
+                const win = document.getElementById('win_call_status');
+                if(win && peerConnection.connectionState === 'connected') {
+                    win.innerHTML = `
+                        <div style="color:var(--neon); text-align:center; font-weight:bold;">VOICE UPLINK ACTIVE</div>
+                        <div class="voice-pulse"><div class="voice-bar"></div></div>
+                        <button class="danger" onclick="endCall('${sid}')" style="width:100%; margin-top:10px">TERMINATE UPLINK</button>
+                    `;
+                }
+            };
+
+            console.log("Creating offer...");
             const offer = await peerConnection.createOffer();
             await peerConnection.setLocalDescription(offer);
-            
-            // Send Offer
-            socket.emit('call_request', { 
-                target_sid: sid, 
-                caller_name: currentUser, 
-                caller_sid: socket.id, 
-                offer: offer 
+
+            console.log("Sending call request with offer");
+            socket.emit('call_request', {
+                target_sid: sid,
+                caller_name: currentUser,
+                caller_sid: socket.id,
+                offer: offer
             });
 
         } catch (err) {
-            console.error(err);
-            alert("AUDIO DEVICE ERROR");
+            console.error("Call initiation error:", err);
+            alert("AUDIO DEVICE ERROR: " + err.message);
         }
     }, true);
 }
 
 async function handleIncomingCall(data){
-    // data: { caller_name, caller_sid, offer }
+    // Store offer data globally
+    pendingCallOffer = data.offer;
+    pendingCallerSid = data.caller_sid;
+    pendingCallerName = data.caller_name;
+    
+    console.log("Incoming call from:", data.caller_name);
+    
     const html = `
         <div style="text-align:center; padding:10px;">
             <h3 style="color:var(--neon); margin:0">INCOMING TRANSMISSION</h3>
             <div style="font-size:18px; margin:10px 0;">${data.caller_name}</div>
             <div style="display:flex; gap:10px; margin-top:10px;">
-                <button class="primary" style="flex:1; background:rgba(0,255,102,0.2)" onclick="acceptCall('${data.caller_sid}', '${escapeHTML(JSON.stringify(data.offer))}')">ACCEPT</button>
-                <button class="danger" style="flex:1;" onclick="rejectCall('${data.caller_sid}')">REJECT</button>
+                <button class="primary" style="flex:1; background:rgba(0,255,102,0.2)" onclick="acceptCall()">ACCEPT</button>
+                <button class="danger" style="flex:1;" onclick="rejectCall()">REJECT</button>
             </div>
         </div>
     `;
     createWindow(`REQ: ${data.caller_name}`, html, 400, 200);
 }
 
-async function acceptCall(callerSid, offerStr){
-    const offer = JSON.parse(offerStr);
+async function acceptCall(){
+    if(!pendingCallOffer || !pendingCallerSid) {
+        alert("ERROR: NO PENDING CALL DATA");
+        return;
+    }
+
+    console.log("Accepting call from:", pendingCallerName);
+
+    const callerSid = pendingCallerSid;
+    const offer = pendingCallOffer;
     currentCallTarget = callerSid;
-    
+
     // UI Update
     const win = Array.from(document.querySelectorAll('.win')).find(w => w.querySelector('.title').innerText.includes('REQ:'));
-    if(win) win.querySelector('.body').innerHTML = `<div style="color:var(--neon); text-align:center">ESTABLISHING LINK...</div><div class="voice-pulse"><div class="voice-bar"></div></div><button class="danger" onclick="endCall('${callerSid}')" style="width:100%; margin-top:10px">TERMINATE UPLINK</button>`;
+    if(win) {
+        win.querySelector('.body').innerHTML = `
+            <div style="color:var(--neon); text-align:center">ESTABLISHING LINK...</div>
+            <div class="voice-pulse"><div class="voice-bar"></div></div>
+            <button class="danger" onclick="endCall('${callerSid}')" style="width:100%; margin-top:10px">TERMINATE UPLINK</button>
+        `;
+    }
 
     try {
+        console.log("Getting microphone access...");
         localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        
+        console.log("Creating peer connection...");
         peerConnection = new RTCPeerConnection(rtcConfig);
-        
-        localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
-        
+
+        localStream.getTracks().forEach(track => {
+            console.log("Adding local track:", track.kind);
+            peerConnection.addTrack(track, localStream);
+        });
+
         peerConnection.onicecandidate = event => {
             if (event.candidate) {
+                console.log("Sending ICE candidate to caller");
                 socket.emit('ice_candidate', { target_sid: callerSid, candidate: event.candidate });
             }
         };
 
         peerConnection.ontrack = event => {
+            console.log("Received remote track");
             const remoteAudio = document.getElementById('remoteAudio');
             remoteAudio.srcObject = event.streams[0];
+            remoteAudio.play().catch(e => console.error("Audio play error:", e));
         };
 
+        peerConnection.onconnectionstatechange = () => {
+            console.log("Connection state:", peerConnection.connectionState);
+            if(win && peerConnection.connectionState === 'connected') {
+                win.querySelector('.body').innerHTML = `
+                    <div style="color:var(--neon); text-align:center; font-weight:bold;">VOICE UPLINK ACTIVE</div>
+                    <div class="voice-pulse"><div class="voice-bar"></div></div>
+                    <button class="danger" onclick="endCall('${callerSid}')" style="width:100%; margin-top:10px">TERMINATE UPLINK</button>
+                `;
+            }
+        };
+
+        console.log("Setting remote description with offer");
         await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+        
+        console.log("Creating answer...");
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
-        
+
+        console.log("Sending answer to caller");
         socket.emit('call_answer', {
             target_sid: callerSid,
             answer: answer
         });
 
+        console.log("Call acceptance complete!");
+
+        // Clear pending data
+        pendingCallOffer = null;
+        pendingCallerSid = null;
+        pendingCallerName = null;
+
     } catch (e) {
-        console.error(e);
-        alert("LINK FAILED");
+        console.error("Call acceptance error:", e);
+        alert("LINK FAILED: " + e.message);
+        
+        if(win) {
+            win.querySelector('.body').innerHTML = `
+                <div style="color:var(--red); text-align:center;">CONNECTION FAILED</div>
+                <div style="font-size:10px; margin-top:5px;">${e.message}</div>
+                <button class="danger" onclick="this.closest('.win').remove()" style="width:100%; margin-top:10px">CLOSE</button>
+            `;
+        }
+        
+        cleanupCall();
     }
 }
 
-function rejectCall(callerSid){
-    socket.emit('end_call', { target_sid: callerSid });
+function rejectCall(){
+    if(pendingCallerSid) {
+        socket.emit('end_call', { target_sid: pendingCallerSid });
+    }
     cleanupCall();
+    
+    // Clear pending data
+    pendingCallOffer = null;
+    pendingCallerSid = null;
+    pendingCallerName = null;
+    
+    // Close the incoming call window
+    const wins = document.querySelectorAll('.win');
+    wins.forEach(w => {
+        if(w.querySelector('.title').innerText.includes('REQ:')) w.remove();
+    });
 }
 
 function endCall(targetSid){
@@ -1107,21 +1231,31 @@ function endCall(targetSid){
 }
 
 function cleanupCall(){
-    if(localStream) localStream.getTracks().forEach(track => track.stop());
-    if(peerConnection) peerConnection.close();
+    if(localStream) {
+        localStream.getTracks().forEach(track => {
+            track.stop();
+            console.log("Stopped track:", track.kind);
+        });
+    }
+    if(peerConnection) {
+        peerConnection.close();
+        console.log("Peer connection closed");
+    }
     localStream = null;
     peerConnection = null;
     currentCallTarget = null;
-    
+
     // Close Call Windows
     const wins = document.querySelectorAll('.win');
     wins.forEach(w => {
-        if(w.querySelector('.title').innerText.includes('CALL:') || w.querySelector('.title').innerText.includes('REQ:')) w.remove();
+        const title = w.querySelector('.title').innerText;
+        if(title.includes('CALL:') || title.includes('REQ:')) w.remove();
     });
 }
 
-function escapeHTML(s){ return (s+'').replace(/&/g,'&').replace(/</g,'<').replace(/>/g,'>'); }
-
+function escapeHTML(s){ 
+    return (s+'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); 
+}
 </script>
 </body>
 </html>
