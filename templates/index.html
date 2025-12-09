@@ -4,6 +4,8 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Bishop House — Omni Portal</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
+
 <style>
 /* --- CORE STYLES --- */
 :root{--neon:#00ff66;--blue:#00aaff;--red:#ff3333;--bg:#000;--muted:#88ffb3;--term-bg:#0c0c0c}
@@ -44,6 +46,8 @@ button{cursor:pointer}
 input[type=text],input[type=password], textarea{width:100%;padding:10px;margin:8px 0;background:#000;border:1px solid var(--neon);color:var(--neon);border-radius:6px;font-family:monospace;box-sizing: border-box;}
 button.primary{background:transparent;border:1px solid var(--neon);color:var(--neon);padding:8px 12px;border-radius:6px;font-weight:bold;}
 button.primary:hover{background:rgba(0,255,102,0.1)}
+button.danger{background:transparent;border:1px solid var(--red);color:var(--red);padding:8px 12px;border-radius:6px;font-weight:bold;}
+button.danger:hover{background:rgba(255,51,51,0.1)}
 
 /* SIDEBAR VAULT */
 #sidebar {
@@ -133,9 +137,16 @@ button.primary:hover{background:rgba(0,255,102,0.1)}
 .msg-me { color: var(--neon); font-weight:bold; }
 .msg-them { color: var(--blue); font-weight:bold; }
 .copyright { position: fixed; bottom: 8px; right: 8px; color: var(--muted); font-size: 10px; text-transform: uppercase; z-index: 1101; }
+
+/* Audio Visualizer (Simple) */
+.voice-pulse { width: 100%; height: 2px; background: #333; margin-top: 10px; position:relative; overflow:hidden;}
+.voice-bar { position: absolute; height: 100%; background: var(--neon); width: 0%; animation: pulseVoice 0.5s infinite; }
+@keyframes pulseVoice { 0% { width:10%; left:45%; } 50% { width:60%; left:20%; } 100% { width:10%; left:45%; } }
 </style>
 </head>
 <body>
+
+<audio id="remoteAudio" autoplay style="display:none;"></audio>
 
 <div id="satOverlay">
     <div class="sat-icon">🛰️</div>
@@ -199,7 +210,7 @@ button.primary:hover{background:rgba(0,255,102,0.1)}
         /++++\        
        /  /\  \        
       /__/  \__\      
-          \/           
+          \/            
     </pre>
     <h2 style="margin-bottom:10px">ACCESS CONTROL</h2>
     <div style="margin-top:8px">
@@ -240,11 +251,12 @@ button.primary:hover{background:rgba(0,255,102,0.1)}
 // Added 'recruiter' field to determine who added whom
 const DEFAULT_MEMBERS = [
     { name: "Bishop 1", role: "supreme", lat: 38.8977, lon: -77.0365, lastActive: 0, recruiter: "System" }, 
-    { name: "Bishop A", role: "node", lat: 24.7136, lon: 46.6753, lastActive: 0, recruiter: "Bishop 1" },     
+    { name: "Bishop A", role: "node", lat: 24.7136, lon: 46.6753, lastActive: 0, recruiter: "Bishop 1" },      
     { name: "Bishop N", role: "node", lat: 9.9312, lon: 76.2673, lastActive: 0, recruiter: "Bishop 1" }      
 ];
 
 let networkMembers = JSON.parse(localStorage.getItem('bishop_members')) || DEFAULT_MEMBERS;
+let onlineSIDs = {}; // MAPPING: Name -> SocketID
 
 const DEFAULT_WALLPAPER = `0xA3F2: load /opt/cicada \n> seeking knowledge... [ok]`;
 let zCounter = 600;
@@ -252,8 +264,95 @@ const taskbar = document.getElementById('taskbar');
 const who = document.getElementById('who');
 let hasConnectedToSat = false;
 let currentUser = null;
+let socket = null; // SocketIO Instance
 
-/* ---------- 2. LOGIN / LOGOUT ---------- */
+// WebRTC Variables
+let localStream = null;
+let peerConnection = null;
+const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+let currentCallTarget = null;
+
+/* ---------- 2. LOGIN / LOGOUT / SOCKET ---------- */
+function initSocket() {
+    socket = io();
+    
+    socket.on('connect', () => {
+        // Find my coords
+        if(currentUser && navigator.geolocation){
+             navigator.geolocation.getCurrentPosition(position => {
+                socket.emit('join_network', { 
+                    name: currentUser, 
+                    lat: position.coords.latitude, 
+                    lon: position.coords.longitude,
+                    lastActive: Date.now()
+                });
+             }, () => {
+                // Fallback if geo fails
+                socket.emit('join_network', { name: currentUser, lat: 0, lon: 0, lastActive: Date.now() });
+             });
+        }
+    });
+
+    // Update real-time status and SID mapping
+    socket.on('network_update', (activeList) => {
+        onlineSIDs = {};
+        activeList.forEach(user => {
+            onlineSIDs[user.name] = user.sid;
+            // Update local storage representation for UI persistence
+            const idx = networkMembers.findIndex(m => m.name === user.name);
+            if(idx > -1) {
+                networkMembers[idx].lastActive = user.lastActive;
+                networkMembers[idx].lat = user.lat;
+                networkMembers[idx].lon = user.lon;
+            }
+        });
+        saveAndRefreshNetwork();
+        updateRadar();
+    });
+
+    socket.on('receive_message', (data) => {
+        // data: { sender, message }
+        const key = `chat_${data.sender.replace(/\s/g,'')}`;
+        // Save to local storage
+        let history = JSON.parse(localStorage.getItem(key) || "[]");
+        history.push({sender: data.sender, txt: data.message});
+        localStorage.setItem(key, JSON.stringify(history));
+
+        // If window open, append
+        const log = document.getElementById(`log_${key}`);
+        if(log){
+            log.innerHTML += `<div><span class="msg-them">${data.sender}:</span> ${escapeHTML(data.message)}</div>`;
+            log.scrollTop = log.scrollHeight;
+        } else {
+            // Notification if window closed
+            createWindow(`MSG: ${data.sender}`, `<div onclick="createMemberChatWin('${data.sender}', 200, 200)">New encrypted message received.<br><button class="primary" style="margin-top:5px">OPEN</button></div>`, 100, 100);
+        }
+    });
+
+    // --- WebRTC Handlers ---
+    socket.on('incoming_call', async (data) => {
+        // data: { caller_name, caller_sid, offer }
+        handleIncomingCall(data);
+    });
+
+    socket.on('call_answered', async (data) => {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+        const win = document.getElementById('win_call_status');
+        if(win) win.innerHTML = `<div style="color:var(--neon); text-align:center">VOICE UPLINK SECURED</div><div class="voice-pulse"><div class="voice-bar"></div></div><button class="danger" onclick="endCall('${data.target_sid}')" style="width:100%; margin-top:10px">TERMINATE UPLINK</button>`;
+    });
+
+    socket.on('receive_ice_candidate', async (data) => {
+        if(peerConnection){
+            try { await peerConnection.addIceCandidate(data.candidate); } catch(e){}
+        }
+    });
+
+    socket.on('call_terminated', () => {
+        cleanupCall();
+        alert("TRANSMISSION ENDED BY REMOTE PEER.");
+    });
+}
+
 function doLogin(){
   const u = document.getElementById('userIn').value.trim();
   const p = document.getElementById('passIn').value;
@@ -281,6 +380,9 @@ function doLogin(){
     renderFlowchart();
     openDesktopWidgets();
     updateRadar();
+
+    // Init Socket
+    initSocket();
     
   } else {
     document.getElementById('loginMsg').innerText = 'ACCESS DENIED';
@@ -288,6 +390,7 @@ function doLogin(){
 }
 
 function doLogout(){
+  if(socket) socket.disconnect();
   currentUser = null;
   document.querySelectorAll('.win').forEach(w => w.remove());
   taskbar.innerHTML = '';
@@ -314,13 +417,13 @@ function enableTermuxWallpaper(on){
 function renderFlowchart(){
     const container = document.getElementById('flowContainer');
     container.innerHTML = '';
-    const isActive = (timestamp) => (Date.now() - timestamp) < 86400000; 
+    const isActive = (name) => !!onlineSIDs[name]; // Check socket presence
 
     const supreme = networkMembers.find(m => m.role === 'supreme');
     if(supreme) {
         const supDiv = document.createElement('div');
         supDiv.className = 'node';
-        const statusClass = isActive(supreme.lastActive) ? 'status-active' : 'status-offline';
+        const statusClass = isActive(supreme.name) ? 'status-active' : 'status-offline';
         supDiv.innerHTML = `<span class="status-dot ${statusClass}"></span>${supreme.name}<br><span class="small muted">SUPREME</span>`;
         supDiv.onclick = () => runWithSat(() => handleNodeClick(supreme));
         container.appendChild(supDiv);
@@ -332,7 +435,7 @@ function renderFlowchart(){
     networkMembers.filter(m => m.role !== 'supreme').forEach(m => {
         const node = document.createElement('div');
         node.className = 'node';
-        const statusClass = isActive(m.lastActive) ? 'status-active' : 'status-offline';
+        const statusClass = isActive(m.name) ? 'status-active' : 'status-offline';
         node.innerHTML = `<span class="status-dot ${statusClass}"></span>${m.name}<br><span class="small muted">NODE</span>`;
         node.onclick = () => runWithSat(() => handleNodeClick(m));
         grid.appendChild(node);
@@ -354,6 +457,8 @@ async function handleNodeClick(targetMember){
         if(data.city || data.countryName) locName = `${data.city || ''}, ${data.countryName}`.toUpperCase();
     } catch(e) {}
 
+    const isOnline = !!onlineSIDs[targetMember.name];
+
     const uplinkHtml = `
         <div style="padding:10px; text-align:center;">
             <div style="color:var(--neon); font-weight:bold;">UPLINK ESTABLISHED</div>
@@ -369,7 +474,7 @@ async function handleNodeClick(targetMember){
             </div>
             <div style="margin-bottom:10px; text-align:left;">
                 <div style="color:#888; font-size:10px;">STATUS</div>
-                <div>${(Date.now() - targetMember.lastActive < 86400000) ? "<span style='color:var(--neon)'>ONLINE</span>" : "<span style='color:#555'>OFFLINE</span>"}</div>
+                <div>${isOnline ? "<span style='color:var(--neon)'>ONLINE (SOCKET)</span>" : "<span style='color:#555'>OFFLINE</span>"}</div>
             </div>
         </div>
     `;
@@ -443,9 +548,10 @@ function updateRadar() {
             blip.style.top = top + '%';
             blip.style.left = left + '%';
             blip.title = `${m.name} (${dist.toFixed(0)}km)`;
+            if(onlineSIDs[m.name]) blip.style.background = '#00ff66'; // Online color
             blipsContainer.appendChild(blip);
             
-            nearbyList.push({ name: m.name, dist: dist });
+            nearbyList.push({ name: m.name, dist: dist, active: !!onlineSIDs[m.name] });
         }
     });
     
@@ -456,6 +562,9 @@ function updateRadar() {
     } else {
         nearbyList.forEach(item => {
             let color = item.dist < 50 ? '#ff3333' : (item.dist < 1000 ? 'var(--neon)' : '#555');
+            // If offline, dim it
+            if(!item.active) color = '#333';
+            
             let label = item.dist < 50 ? 'VICINITY' : (item.dist < 1000 ? 'REGIONAL' : 'GLOBAL');
             listHtml += `<div style="color:${color}; display:flex; justify-content:space-between; margin-bottom:4px; border-bottom:1px solid #222;">
                         <span>${item.name}</span>
@@ -475,7 +584,7 @@ function getDistanceFromLatLonInKm(lat1,lon1,lat2,lon2) {
 function deg2rad(deg) { return deg * (Math.PI/180); }
 
 
-/* ---------- 6. SECURE VAULT (DEAD DROP - FIXED) ---------- */
+/* ---------- 6. SECURE VAULT (DEAD DROP) ---------- */
 function openVault(){
     const win = createWindow('📁 CLASSIFIED DOCUMENTS', '<div id="vaultContent">Loading...</div>', 300, 100);
     renderVaultContent(win.querySelector('#vaultContent'));
@@ -616,7 +725,7 @@ function runWithSat(callback, forceSat = false) {
     }
 }
 
-/* ---------- 8. NETWORK MANAGEMENT (Strict Hierarchy) ---------- */
+/* ---------- 8. NETWORK MANAGEMENT ---------- */
 function openNetworkManager(){
     const html = `
         <div style="display:flex; gap:10px; margin-bottom:15px;">
@@ -632,13 +741,13 @@ function openNetworkManager(){
 
 function renderMemberList(){
     return networkMembers.map(m => {
-        // Logic: You can only remove if YOU are the recruiter
         const canRemove = (m.recruiter === currentUser);
         const btn = canRemove ? `<button class="btn-xs" style="color:red; border-color:red;" onclick="removeBishop('${m.name}')">EXILE</button>` : '';
         const badge = m.recruiter ? `<span style="font-size:9px; color:#666;">(Added by ${m.recruiter})</span>` : '';
+        const online = onlineSIDs[m.name] ? '<span style="color:#0f0; font-size:9px"> [ON]</span>' : '';
         
         return `<div style="display:flex; justify-content:space-between; border-bottom:1px solid #222; padding:5px;">
-            <span>${m.name} ${badge}</span>
+            <span>${m.name} ${badge} ${online}</span>
             ${m.role !== 'supreme' ? btn : ''}
         </div>`;
     }).join('');
@@ -654,7 +763,7 @@ function addBishop(){
         lat: 0, 
         lon: 0, 
         lastActive: 0,
-        recruiter: currentUser // Store who added them
+        recruiter: currentUser 
     });
     
     saveAndRefreshNetwork();
@@ -820,25 +929,45 @@ function openDesktopWidgets(){
 
 function createMemberChatWin(target, left, top){
   const key = `chat_${target.replace(/\s/g,'')}`;
+  const targetSid = onlineSIDs[target];
+  const statusHtml = targetSid ? "<span style='color:var(--neon)'>[SECURE LINK AVAILABLE]</span>" : "<span style='color:#555'>[LINK OFFLINE]</span>";
+  
   const html = `
+    <div style="font-size:10px; margin-bottom:5px;">STATUS: ${statusHtml}</div>
     <div id="log_${key}" style="height:150px; overflow-y:auto; border:1px solid #333; margin-bottom:5px; padding:5px;"></div>
     <div style="display:flex; gap:5px;">
       <input id="in_${key}" type="text" style="flex:1;" placeholder="Type...">
-      <button class="primary" onclick="sendMsg('${key}')">SEND</button>
+      <button class="primary" onclick="sendMsg('${key}', '${target}')">SEND</button>
     </div>
-    <button class="primary" style="width:100%; margin-top:5px;" onclick="runWithSat(function(){ alert('VOICE LINK ACTIVE') }, true)">📞 SECURE VOICE</button>
+    <button class="primary" style="width:100%; margin-top:5px;" onclick="initCall('${target}')">📞 SECURE VOICE</button>
   `;
   createWindow(`Comms: ${target}`, html, left, top);
   loadChat(key);
 }
 
-function sendMsg(key){
+function sendMsg(key, targetName){
   const input = document.getElementById(`in_${key}`);
   const msg = input.value;
   if(!msg) return;
   const log = document.getElementById(`log_${key}`);
+  
+  // Send via socket if user online
+  const sid = onlineSIDs[targetName];
+  if(sid){
+    socket.emit('send_message', {
+        target_sid: sid,
+        target_name: targetName,
+        sender: currentUser,
+        message: msg
+    });
+  } else {
+    log.innerHTML += `<div style="color:red; font-size:10px;">ERROR: TARGET OFFLINE</div>`;
+  }
+
   log.innerHTML += `<div><span class="msg-me">Me:</span> ${escapeHTML(msg)}</div>`;
   input.value = '';
+  log.scrollTop = log.scrollHeight;
+  
   let history = JSON.parse(localStorage.getItem(key) || "[]");
   history.push({sender: "Me", txt: msg});
   localStorage.setItem(key, JSON.stringify(history));
@@ -848,7 +977,147 @@ function loadChat(key){
   const log = document.getElementById(`log_${key}`);
   if(!log) return;
   let history = JSON.parse(localStorage.getItem(key) || "[]");
-  history.forEach(h => { log.innerHTML += `<div><span class="msg-me">Me:</span> ${escapeHTML(h.txt)}</div>`; });
+  history.forEach(h => { 
+      const cls = h.sender === "Me" ? "msg-me" : "msg-them";
+      log.innerHTML += `<div><span class="${cls}">${h.sender}:</span> ${escapeHTML(h.txt)}</div>`; 
+  });
+  log.scrollTop = log.scrollHeight;
+}
+
+/* ---------- 12. WEBRTC AUDIO CALL IMPLEMENTATION ---------- */
+
+async function initCall(targetName){
+    const sid = onlineSIDs[targetName];
+    if(!sid) return alert("TARGET OFFLINE - CANNOT ESTABLISH VOICE LINK");
+    
+    currentCallTarget = sid;
+    runWithSat(async () => {
+        // Create Call Window
+        const html = `<div id="win_call_status" style="text-align:center;">Requesting Uplink...</div>`;
+        createWindow(`CALL: ${targetName}`, html, 300, 300);
+
+        try {
+            // Get Mic
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            
+            // Create Peer Connection
+            peerConnection = new RTCPeerConnection(rtcConfig);
+            
+            // Add Tracks
+            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+            
+            // Handle Ice Candidates
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    socket.emit('ice_candidate', { target_sid: sid, candidate: event.candidate });
+                }
+            };
+
+            // Handle Remote Stream
+            peerConnection.ontrack = event => {
+                const remoteAudio = document.getElementById('remoteAudio');
+                if (remoteAudio.srcObject !== event.streams[0]) {
+                    remoteAudio.srcObject = event.streams[0];
+                    console.log('Received remote stream');
+                }
+            };
+
+            // Create Offer
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            
+            // Send Offer
+            socket.emit('call_request', { 
+                target_sid: sid, 
+                caller_name: currentUser, 
+                caller_sid: socket.id, 
+                offer: offer 
+            });
+
+        } catch (err) {
+            console.error(err);
+            alert("AUDIO DEVICE ERROR");
+        }
+    }, true);
+}
+
+async function handleIncomingCall(data){
+    // data: { caller_name, caller_sid, offer }
+    const html = `
+        <div style="text-align:center; padding:10px;">
+            <h3 style="color:var(--neon); margin:0">INCOMING TRANSMISSION</h3>
+            <div style="font-size:18px; margin:10px 0;">${data.caller_name}</div>
+            <div style="display:flex; gap:10px; margin-top:10px;">
+                <button class="primary" style="flex:1; background:rgba(0,255,102,0.2)" onclick="acceptCall('${data.caller_sid}', '${escapeHTML(JSON.stringify(data.offer))}')">ACCEPT</button>
+                <button class="danger" style="flex:1;" onclick="rejectCall('${data.caller_sid}')">REJECT</button>
+            </div>
+        </div>
+    `;
+    createWindow(`REQ: ${data.caller_name}`, html, 400, 200);
+}
+
+async function acceptCall(callerSid, offerStr){
+    const offer = JSON.parse(offerStr);
+    currentCallTarget = callerSid;
+    
+    // UI Update
+    const win = Array.from(document.querySelectorAll('.win')).find(w => w.querySelector('.title').innerText.includes('REQ:'));
+    if(win) win.querySelector('.body').innerHTML = `<div style="color:var(--neon); text-align:center">ESTABLISHING LINK...</div><div class="voice-pulse"><div class="voice-bar"></div></div><button class="danger" onclick="endCall('${callerSid}')" style="width:100%; margin-top:10px">TERMINATE UPLINK</button>`;
+
+    try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        peerConnection = new RTCPeerConnection(rtcConfig);
+        
+        localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+        
+        peerConnection.onicecandidate = event => {
+            if (event.candidate) {
+                socket.emit('ice_candidate', { target_sid: callerSid, candidate: event.candidate });
+            }
+        };
+
+        peerConnection.ontrack = event => {
+            const remoteAudio = document.getElementById('remoteAudio');
+            remoteAudio.srcObject = event.streams[0];
+        };
+
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        
+        socket.emit('call_answer', {
+            target_sid: callerSid,
+            answer: answer
+        });
+
+    } catch (e) {
+        console.error(e);
+        alert("LINK FAILED");
+    }
+}
+
+function rejectCall(callerSid){
+    socket.emit('end_call', { target_sid: callerSid });
+    cleanupCall();
+}
+
+function endCall(targetSid){
+    socket.emit('end_call', { target_sid: targetSid });
+    cleanupCall();
+}
+
+function cleanupCall(){
+    if(localStream) localStream.getTracks().forEach(track => track.stop());
+    if(peerConnection) peerConnection.close();
+    localStream = null;
+    peerConnection = null;
+    currentCallTarget = null;
+    
+    // Close Call Windows
+    const wins = document.querySelectorAll('.win');
+    wins.forEach(w => {
+        if(w.querySelector('.title').innerText.includes('CALL:') || w.querySelector('.title').innerText.includes('REQ:')) w.remove();
+    });
 }
 
 function escapeHTML(s){ return (s+'').replace(/&/g,'&').replace(/</g,'<').replace(/>/g,'>'); }
